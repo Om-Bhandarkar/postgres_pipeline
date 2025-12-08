@@ -42,18 +42,18 @@ pipeline {
         stage('Health Check') {
             steps {
                 script {
-                    echo "Checking if PostgreSQL service is alive..."
+                    echo "Checking if PostgreSQL service is alive INSIDE container..."
 
-                    def result = sh(
-                        script: "PGPASSWORD=admin123 psql -U admin -h localhost -d mydb -c '\\l' >/dev/null 2>&1",
-                        returnStatus: true
-                    )
+                    sh '''
+                        for i in {1..20}; do
+                            echo "Attempt $i: checking PostgreSQL inside container..."
+                            docker exec postgres_local pg_isready -U admin -d mydb && exit 0
+                            sleep 3
+                        done
 
-                    if (result == 0) {
-                        echo "PostgreSQL is up and responding ✔️"
-                    } else {
-                        error("PostgreSQL is not responding ❌")
-                    }
+                        echo "PostgreSQL is not responding!"
+                        exit 1
+                    '''
                 }
             }
         }
@@ -62,30 +62,35 @@ pipeline {
             steps {
                 script {
                     echo "Starting restore process..."
-                    echo "Backup file path: ${params.BACKUP_FILE}"
+                    echo "Backup file: ${params.BACKUP_FILE}"
 
-                    if (!fileExists("${WORKSPACE}/${BACKUP_FILE}")) {
-                        error("Backup file not found in workspace!")
+                    if (params.BACKUP_FILE == null || params.BACKUP_FILE.trim() == "") {
+                        error "❌ No backup file uploaded!"
                     }
+
+                    if (!fileExists("${WORKSPACE}/${params.BACKUP_FILE}")) {
+                        error "❌ Backup file not found in workspace: ${WORKSPACE}/${params.BACKUP_FILE}"
+                    }
+
+                    echo "Copying backup file into PostgreSQL container..."
+                    sh """
+                        docker cp "${WORKSPACE}/${params.BACKUP_FILE}" postgres_local:/tmp/backup_file
+                    """
 
                     if (params.BACKUP_FORMAT == "CUSTOM") {
                         echo "Restoring using pg_restore (custom format)..."
 
-                        sh """
-                            export PGPASSWORD=admin123
-                            pg_restore --clean --if-exists --no-owner \
-                                -h localhost -p 5432 -U admin -d mydb \
-                                ${BACKUP_FILE}
-                        """
-
+                        sh '''
+                            docker exec postgres_local bash -c \
+                              "pg_restore --clean --if-exists --no-owner -U admin -d mydb /tmp/backup_file"
+                        '''
                     } else {
                         echo "Restoring using psql (plain SQL)..."
 
-                        sh """
-                            export PGPASSWORD=admin123
-                            psql -h localhost -p 5432 -U admin -d mydb \
-                                -f ${BACKUP_FILE}
-                        """
+                        sh '''
+                            docker exec postgres_local bash -c \
+                              "psql -U admin -d mydb -f /tmp/backup_file"
+                        '''
                     }
 
                     echo "Restore completed ✔️"
@@ -103,4 +108,3 @@ pipeline {
         }
     }
 }
-
