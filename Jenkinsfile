@@ -52,7 +52,8 @@ pipeline {
                     echo "Copying backup file into container..."
 
                     sh """
-                        docker cp ${BACKUP_FILE} postgres_local:/tmp/backup_file
+                        docker cp "${WORKSPACE}/${params.BACKUP_FILE}" postgres_local:/tmp/backup_file
+
                     """
 
                     if (params.BACKUP_FORMAT == 'CUSTOM') {
