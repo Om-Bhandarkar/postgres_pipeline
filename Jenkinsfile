@@ -8,40 +8,52 @@ pipeline {
 
     stages {
 
-        stage('Start PostgreSQL Container') {
+        stage('Check PostgreSQL Installation') {
             steps {
                 script {
-                    echo "Starting PostgreSQL using docker-compose…"
+                    echo "Checking if PostgreSQL client is installed..."
 
-                    sh '''
-                        if [ ! -f docker-compose.yml ]; then
-                            echo "docker-compose.yml missing!"
-                            exit 1
-                        fi
+                    def status = sh(
+                        script: "command -v psql >/dev/null 2>&1",
+                        returnStatus: true
+                    )
 
-                        docker compose up -d
-                    '''
+                    if (status == 0) {
+                        echo "PostgreSQL client already installed ✔️"
+                    } else {
+                        echo "PostgreSQL NOT installed. Installing using docker-compose…"
 
-                    echo "Waiting for container to start..."
+                        sh '''
+                            if [ ! -f docker-compose.yml ]; then
+                                echo "docker-compose.yml missing!"
+                                exit 1
+                            fi
+
+                            docker compose up -d
+                        '''
+
+                        echo "Waiting for PostgreSQL to start..."
+                        sleep 12
+                    }
                 }
             }
         }
 
-        stage('Health Check INSIDE Container') {
+        stage('Health Check') {
             steps {
                 script {
-                    echo "Checking if PostgreSQL is ready..."
+                    echo "Checking if PostgreSQL service is alive..."
 
-                    sh '''
-                        for i in {1..20}; do
-                            echo "Attempt $i: checking Postgres inside container..."
-                            docker exec postgres_local pg_isready -U admin -d mydb && exit 0
-                            sleep 3
-                        done
+                    def result = sh(
+                        script: "PGPASSWORD=admin123 psql -U admin -h localhost -d mydb -c '\\l' >/dev/null 2>&1",
+                        returnStatus: true
+                    )
 
-                        echo "PostgreSQL did not become ready!"
-                        exit 1
-                    '''
+                    if (result == 0) {
+                        echo "PostgreSQL is up and responding ✔️"
+                    } else {
+                        error("PostgreSQL is not responding ❌")
+                    }
                 }
             }
         }
@@ -49,29 +61,34 @@ pipeline {
         stage('Restore Database') {
             steps {
                 script {
-                    echo "Copying backup file into container..."
+                    echo "Starting restore process..."
+                    echo "Backup file path: ${params.BACKUP_FILE}"
 
-                    sh """
-                        docker cp "${WORKSPACE}/${params.BACKUP_FILE}" postgres_local:/tmp/backup_file
+                    if (!fileExists("${WORKSPACE}/${BACKUP_FILE}")) {
+                        error("Backup file not found in workspace!")
+                    }
 
-                    """
-
-                    if (params.BACKUP_FORMAT == 'CUSTOM') {
-                        echo "Restoring custom dump using pg_restore..."
+                    if (params.BACKUP_FORMAT == "CUSTOM") {
+                        echo "Restoring using pg_restore (custom format)..."
 
                         sh """
-                            docker exec postgres_local bash -c "pg_restore --clean --if-exists --no-owner -U admin -d mydb /tmp/backup_file"
+                            export PGPASSWORD=admin123
+                            pg_restore --clean --if-exists --no-owner \
+                                -h localhost -p 5432 -U admin -d mydb \
+                                ${BACKUP_FILE}
                         """
 
                     } else {
-                        echo "Restoring SQL file using psql..."
+                        echo "Restoring using psql (plain SQL)..."
 
                         sh """
-                            docker exec postgres_local bash -c "psql -U admin -d mydb -f /tmp/backup_file"
+                            export PGPASSWORD=admin123
+                            psql -h localhost -p 5432 -U admin -d mydb \
+                                -f ${BACKUP_FILE}
                         """
                     }
 
-                    echo "Restore completed successfully!"
+                    echo "Restore completed ✔️"
                 }
             }
         }
@@ -79,10 +96,11 @@ pipeline {
 
     post {
         success {
-            echo "Pipeline finished successfully — DB restored ✔️"
+            echo "Pipeline finished successfully — database restored ✔️"
         }
         failure {
             echo "Pipeline failed — check logs ❌"
         }
     }
 }
+this is my jenkinsfile
