@@ -1,69 +1,184 @@
 pipeline {
     agent any
- 
+    
     parameters {
-        file(name: 'BACKUP_FILE', description: 'Upload Postgres backup (.dump or .sql)')
-        choice(name: 'BACKUP_FORMAT', choices: ['CUSTOM', 'PLAIN_SQL'], description: 'Backup file format')
+        string(
+            name: 'BACKUP_FILE',
+            defaultValue: '',
+            description: 'Full path to the backup file (e.g., /opt/backups/mybackup.tar.gz)'
+        )
     }
- 
+    
+    environment {
+        RESTORE_LOCATION = '/opt/restored_files/'
+        BACKUP_LOCATION = '/opt/backups/'
+        TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
+    }
+    
     stages {
-        stage('Setup') {
+        stage('Initialize') {
             steps {
                 script {
-                    if (params.BACKUP_FILE == null) {
-                        error "Please use 'Build with Parameters' and upload a backup file first!"
-                    }
+                    echo "Backup File: ${params.BACKUP_FILE}"
                     
-                    // Start PostgreSQL
-                    sh '''
-                        docker stop postgres_local || true
-                        docker rm postgres_local || true
-                        
-                        docker run -d \
-                          --name postgres_local \
-                          -e POSTGRES_USER=admin \
-                          -e POSTGRES_PASSWORD=admin123 \
-                          -e POSTGRES_DB=mydb \
-                          -p 5432:5432 \
-                          postgres:15
-                        
-                        sleep 10
-                    '''
+                    // Create directories if they don't exist
+                    sh """
+                        mkdir -p "${BACKUP_LOCATION}"
+                        mkdir -p "${RESTORE_LOCATION}"
+                    """
                 }
             }
         }
         
-        stage('Restore') {
+        stage('Validate Backup File') {
             steps {
                 script {
-                    // Find the uploaded file
-                    sh '''
-                        echo "Looking for uploaded file..."
-                        find . -type f -name "*.dump" -o -name "*.sql" -o -name "*.backup" | head -5
-                        echo ""
-                        ls -la
-                    '''
-                    
-                    // Get the first backup file found
-                    def backupFile = sh(script: 'find . -type f \\( -name "*.dump" -o -name "*.sql" \\) | head -1', returnStdout: true).trim()
-                    
-                    if (!backupFile) {
-                        error "No backup file found! Please upload a .dump or .sql file."
+                    if (!params.BACKUP_FILE?.trim()) {
+                        error "BACKUP_FILE parameter is required"
                     }
                     
-                    echo "Using backup file: ${backupFile}"
-                    
-                    sh """
-                        docker cp "${backupFile}" postgres_local:/tmp/backup_file
+                    // Check if backup file exists
+                    if (!fileExists(params.BACKUP_FILE)) {
+                        echo "Backup file not found: ${params.BACKUP_FILE}"
+                        echo "Creating a new backup..."
                         
-                        if [ "${params.BACKUP_FORMAT}" = "CUSTOM" ]; then
-                            docker exec postgres_local pg_restore -U admin -d mydb /tmp/backup_file
-                        else
-                            docker exec postgres_local psql -U admin -d mydb -f /tmp/backup_file
-                        fi
-                    """
+                        // Extract filename from path
+                        def fileName = new File(params.BACKUP_FILE).getName()
+                        def backupFilePath = "${BACKUP_LOCATION}/${fileName}"
+                        
+                        echo "Will create backup at: ${backupFilePath}"
+                        env.BACKUP_PATH = backupFilePath
+                        env.ACTION = 'backup'
+                    } else {
+                        echo "Backup file exists: ${params.BACKUP_FILE}"
+                        echo "Will restore from this backup..."
+                        env.BACKUP_PATH = params.BACKUP_FILE
+                        env.ACTION = 'restore'
+                    }
                 }
             }
+        }
+        
+        stage('Backup or Restore') {
+            steps {
+                script {
+                    if (env.ACTION == 'backup') {
+                        stage('Create New Backup') {
+                            steps {
+                                script {
+                                    echo "Creating new backup at: ${env.BACKUP_PATH}"
+                                    
+                                    // Check if we're backing up a file or directory
+                                    def sourcePath = params.BACKUP_FILE
+                                    if (params.BACKUP_FILE.contains('/')) {
+                                        sourcePath = new File(params.BACKUP_FILE).getParent()
+                                    }
+                                    
+                                    // Create backup with tar.gz compression
+                                    sh """
+                                        # Create backup
+                                        tar -czf "${env.BACKUP_PATH}" -C "${sourcePath}" .
+                                        
+                                        # Verify the backup was created
+                                        if [ -f "${env.BACKUP_PATH}" ]; then
+                                            echo "✓ Backup created successfully"
+                                            echo "Backup location: ${env.BACKUP_PATH}"
+                                            echo "Backup size: \$(du -h "${env.BACKUP_PATH}" | cut -f1)"
+                                            echo "Backup MD5: \$(md5sum "${env.BACKUP_PATH}" | cut -d' ' -f1)"
+                                        else
+                                            echo "✗ Backup failed!"
+                                            exit 1
+                                        fi
+                                    """
+                                    
+                                    currentBuild.description = "Backup created: ${env.BACKUP_PATH}"
+                                }
+                            }
+                        }
+                    } else {
+                        stage('Restore from Backup') {
+                            steps {
+                                script {
+                                    echo "Restoring from backup: ${env.BACKUP_PATH}"
+                                    echo "Restoring to: ${RESTORE_LOCATION}"
+                                    
+                                    // Extract the backup
+                                    sh """
+                                        # Create restore directory if it doesn't exist
+                                        mkdir -p "${RESTORE_LOCATION}"
+                                        
+                                        # Extract the backup
+                                        tar -xzf "${env.BACKUP_PATH}" -C "${RESTORE_LOCATION}"
+                                        
+                                        # Verify extraction
+                                        echo "✓ Restore completed successfully"
+                                        echo "Extracted files in ${RESTORE_LOCATION}:"
+                                        ls -la "${RESTORE_LOCATION}/"
+                                        echo "Total files: \$(find "${RESTORE_LOCATION}" -type f | wc -l)"
+                                    """
+                                    
+                                    currentBuild.description = "Restored: ${env.BACKUP_PATH}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Post Operation Summary') {
+            steps {
+                script {
+                    if (env.ACTION == 'backup') {
+                        echo "=== Backup Summary ==="
+                        sh """
+                            echo "Backup file: ${env.BACKUP_PATH}"
+                            ls -lh "${env.BACKUP_PATH}"
+                            echo ""
+                            echo "All backups in ${BACKUP_LOCATION}:"
+                            ls -lh "${BACKUP_LOCATION}" | head -10
+                        """
+                    } else {
+                        echo "=== Restore Summary ==="
+                        sh """
+                            echo "Restored from: ${env.BACKUP_PATH}"
+                            echo "Restored to: ${RESTORE_LOCATION}"
+                            echo ""
+                            echo "Restored contents:"
+                            find "${RESTORE_LOCATION}" -type f | head -20
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo "Operation completed successfully!"
+                echo "Action performed: ${env.ACTION}"
+                echo "Backup file: ${env.BACKUP_PATH}"
+                
+                if (env.ACTION == 'backup') {
+                    echo "New backup created at: ${env.BACKUP_PATH}"
+                } else {
+                    echo "Files restored to: ${RESTORE_LOCATION}"
+                }
+            }
+        }
+        
+        failure {
+            script {
+                echo "Pipeline failed!"
+                echo "Please check the logs for details."
+            }
+        }
+        
+        always {
+            echo "Cleaning up workspace..."
+            cleanWs()
+            echo "Pipeline execution completed."
         }
     }
 }
