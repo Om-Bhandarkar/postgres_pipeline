@@ -9,8 +9,9 @@ pipeline {
     }
     
     environment {
-        RESTORE_LOCATION = '/opt/restored_files/'
-        BACKUP_LOCATION = '/opt/backups/'
+        // Use workspace directories instead of /opt/
+        RESTORE_LOCATION = "${WORKSPACE}/restored_files/"
+        BACKUP_LOCATION = "${WORKSPACE}/backups/"
         TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
     }
     
@@ -19,11 +20,14 @@ pipeline {
             steps {
                 script {
                     echo "Starting pipeline..."
+                    echo "Workspace: ${WORKSPACE}"
                     
-                    // Create directories if they don't exist
+                    // Create directories in workspace (no permission issues)
                     sh """
                         mkdir -p "${BACKUP_LOCATION}"
                         mkdir -p "${RESTORE_LOCATION}"
+                        echo "Backup location: ${BACKUP_LOCATION}"
+                        echo "Restore location: ${RESTORE_LOCATION}"
                     """
                     
                     // Check if a file was uploaded
@@ -46,38 +50,41 @@ pipeline {
                         // RESTORE: Process uploaded file
                         echo "Processing uploaded backup file for restoration..."
                         
-                        // The uploaded file is in the workspace
-                        def uploadedFilePath = "${env.UPLOADED_FILE}"
-                        
                         sh """
-                            echo "Uploaded file path: ${uploadedFilePath}"
-                            echo "File exists check:"
-                            ls -la "${uploadedFilePath}" || true
+                            echo "Uploaded file: ${params.UPLOADED_BACKUP_FILE}"
+                            echo "Listing workspace files:"
+                            pwd
+                            ls -la
                         """
                         
-                        // Move uploaded file to restore location and extract
+                        // Extract uploaded file
                         sh """
                             # Create restore directory
                             mkdir -p "${RESTORE_LOCATION}"
                             
-                            # Check if file is a tar.gz archive
-                            if file "${uploadedFilePath}" | grep -q "gzip compressed data"; then
-                                echo "Extracting gzip compressed backup..."
-                                tar -xzf "${uploadedFilePath}" -C "${RESTORE_LOCATION}"
-                            elif file "${uploadedFilePath}" | grep -q "tar archive"; then
-                                echo "Extracting tar archive..."
-                                tar -xf "${uploadedFilePath}" -C "${RESTORE_LOCATION}"
-                            elif file "${uploadedFilePath}" | grep -q "Zip archive"; then
-                                echo "Extracting zip archive..."
-                                unzip "${uploadedFilePath}" -d "${RESTORE_LOCATION}"
+                            # Check file type and extract
+                            if [ -f "${params.UPLOADED_BACKUP_FILE}" ]; then
+                                echo "File found, extracting..."
+                                
+                                if [[ "${params.UPLOADED_BACKUP_FILE}" == *.tar.gz ]] || [[ "${params.UPLOADED_BACKUP_FILE}" == *.tgz ]]; then
+                                    echo "Extracting tar.gz file..."
+                                    tar -xzf "${params.UPLOADED_BACKUP_FILE}" -C "${RESTORE_LOCATION}"
+                                elif [[ "${params.UPLOADED_BACKUP_FILE}" == *.tar ]]; then
+                                    echo "Extracting tar file..."
+                                    tar -xf "${params.UPLOADED_BACKUP_FILE}" -C "${RESTORE_LOCATION}"
+                                elif [[ "${params.UPLOADED_BACKUP_FILE}" == *.zip ]]; then
+                                    echo "Extracting zip file..."
+                                    unzip "${params.UPLOADED_BACKUP_FILE}" -d "${RESTORE_LOCATION}"
+                                else
+                                    echo "Copying as regular file..."
+                                    cp "${params.UPLOADED_BACKUP_FILE}" "${RESTORE_LOCATION}/"
+                                fi
+                                
+                                echo "✓ Restoration completed"
                             else
-                                echo "Copying as regular file..."
-                                cp "${uploadedFilePath}" "${RESTORE_LOCATION}/"
+                                echo "Uploaded file not found!"
+                                exit 1
                             fi
-                            
-                            echo "✓ Restoration completed successfully"
-                            echo "Restored files in ${RESTORE_LOCATION}:"
-                            ls -la "${RESTORE_LOCATION}/"
                         """
                         
                         currentBuild.description = "Restored uploaded backup"
@@ -90,6 +97,12 @@ pipeline {
                         def backupFilePath = "${BACKUP_LOCATION}/${backupFileName}"
                         
                         sh """
+                            echo "Creating backup of workspace..."
+                            echo "Current directory:"
+                            pwd
+                            echo "Workspace contents:"
+                            ls -la
+                            
                             # Create backup of current workspace
                             tar -czf "${backupFilePath}" .
                             
@@ -98,7 +111,6 @@ pipeline {
                                 echo "✓ Backup created successfully"
                                 echo "Backup location: ${backupFilePath}"
                                 echo "Backup size: \$(du -h "${backupFilePath}" | cut -f1)"
-                                echo "Backup MD5: \$(md5sum "${backupFilePath}" | cut -d' ' -f1)"
                             else
                                 echo "✗ Backup failed!"
                                 exit 1
@@ -121,10 +133,9 @@ pipeline {
                         echo "Restore location: ${RESTORE_LOCATION}"
                         sh """
                             echo "Restored contents:"
-                            find "${RESTORE_LOCATION}" -type f | head -20
+                            ls -la "${RESTORE_LOCATION}/"
                             echo ""
-                            echo "Directory structure:"
-                            tree "${RESTORE_LOCATION}" -L 3 2>/dev/null || find "${RESTORE_LOCATION}" -type d | head -20
+                            echo "Total files: \$(find "${RESTORE_LOCATION}" -type f | wc -l)"
                         """
                     } else {
                         echo "=== BACKUP SUMMARY ==="
@@ -133,31 +144,19 @@ pipeline {
                         sh """
                             echo "Backup details:"
                             ls -lh "${env.BACKUP_CREATED}"
-                            echo ""
-                            echo "All backups in ${BACKUP_LOCATION}:"
-                            ls -lh "${BACKUP_LOCATION}" | head -10
                         """
                     }
                 }
             }
         }
         
-        stage('Optional: Download Backup') {
-            when {
-                expression { env.ACTION == 'backup' && env.BACKUP_CREATED }
-            }
+        stage('Archive Artifacts') {
             steps {
                 script {
-                    echo "Backup created and available for download:"
-                    echo "File: ${env.BACKUP_CREATED}"
-                    
-                    // Archive the backup file as an artifact
-                    archiveArtifacts artifacts: "${env.BACKUP_CREATED}", fingerprint: true
-                    
-                    sh """
-                        echo "Backup file size: \$(du -h "${env.BACKUP_CREATED}" | cut -f1)"
-                        echo "MD5 checksum: \$(md5sum "${env.BACKUP_CREATED}" | cut -d' ' -f1)"
-                    """
+                    if (env.ACTION == 'backup' && env.BACKUP_CREATED) {
+                        echo "Archiving backup as Jenkins artifact..."
+                        archiveArtifacts artifacts: "backups/*", fingerprint: true
+                    }
                 }
             }
         }
@@ -171,9 +170,9 @@ pipeline {
                 
                 if (env.ACTION == 'backup') {
                     echo "Backup created: ${env.BACKUP_CREATED}"
-                    echo "You can download it from the Jenkins artifacts"
+                    echo "Download from: ${BUILD_URL}artifact/backups/"
                 } else {
-                    echo "File restored to: ${RESTORE_LOCATION}"
+                    echo "Files restored to workspace directory: ${RESTORE_LOCATION}"
                 }
             }
         }
@@ -183,9 +182,7 @@ pipeline {
         }
         
         always {
-            echo "Cleaning up..."
-            // Optional: clean workspace but keep important files
-            cleanWs(cleanWhenAborted: true, cleanWhenFailure: true, cleanWhenNotBuilt: true, cleanWhenUnstable: true, cleanWhenSuccess: true)
+            echo "Pipeline execution completed."
         }
     }
 }
