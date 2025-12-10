@@ -14,57 +14,49 @@ pipeline {
 
     stages {
 
-        /* ---------------------- INITIALIZE ---------------------- */
         stage('Initialize') {
             steps {
                 script {
-
                     echo "Initializing PostgreSQL Restore Pipeline..."
                     echo "Workspace: ${WORKSPACE}"
 
-                    // Create temp restore directory
-                    sh """
-                        mkdir -p "${RESTORE_LOCATION}"
-                    """
+                    sh "mkdir -p '${RESTORE_LOCATION}'"
 
-                    // Validate upload
+                    // FILE PARAM FIX — Correct full path
                     if (!params.UPLOADED_BACKUP_FILE) {
                         error "❌ No backup file uploaded. Upload a .dump file and try again."
                     }
 
-                    env.UPLOADED_FILE = params.UPLOADED_BACKUP_FILE
+                    // FULL PATH OF THE UPLOADED FILE
+                    env.UPLOADED_FILE = "${WORKSPACE}/${params.UPLOADED_BACKUP_FILE}"
 
-                    echo "Uploaded File: ${env.UPLOADED_FILE}"
+                    echo "Uploaded file name: ${params.UPLOADED_BACKUP_FILE}"
+                    echo "Full file path: ${env.UPLOADED_FILE}"
 
                     // timestamp
-                    env.TIMESTAMP = sh(
-                        script: 'date +%Y%m%d_%H%M%S',
-                        returnStdout: true
-                    ).trim()
+                    env.TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
                 }
             }
         }
 
-        /* ---------------------- RESTORE PROCESS ---------------------- */
         stage('Restore Database') {
             steps {
                 script {
-
                     if (!env.UPLOADED_FILE.endsWith(".dump")) {
                         error "❌ Only .dump PostgreSQL backup files are supported."
                     }
 
-                    echo "✓ Valid .dump file detected"
-                    echo "Starting PostgreSQL Restore Process..."
-
                     sh """
-                        echo "Copying dump file to Jenkins temp restore folder..."
+                        echo "Checking if uploaded .dump file exists..."
+                        ls -lh "${env.UPLOADED_FILE}" || (echo "File not found!" && exit 1)
+
+                        echo "Copying dump file to restore folder..."
                         cp "${env.UPLOADED_FILE}" "${RESTORE_LOCATION}/restore.dump"
 
-                        echo "Ensuring target PostgreSQL database exists..."
-                        PGPASSWORD='mypassword' createdb -U postgres restore_db || echo "Database already exists"
+                        echo "Ensuring restore_db exists..."
+                        PGPASSWORD='mypassword' createdb -U postgres restore_db || echo "DB already exists"
 
-                        echo "Running pg_restore..."
+                        echo "Running PostgreSQL restore..."
                         PGPASSWORD='mypassword' pg_restore \
                             --no-owner \
                             --role=postgres \
@@ -72,41 +64,28 @@ pipeline {
                             -d restore_db \
                             "${RESTORE_LOCATION}/restore.dump"
 
-                        echo "✓ PostgreSQL Restore Completed Successfully"
+                        echo "✓ Restore Completed Successfully"
                     """
-
-                    currentBuild.description = "Restore done → DB: restore_db | File: restore.dump"
                 }
             }
         }
 
-        /* ---------------------- SUMMARY ---------------------- */
         stage('Summary') {
             steps {
                 script {
-
-                    echo "============== RESTORE SUMMARY =============="
-                    echo "Temporary restore folder: ${RESTORE_LOCATION}"
-
-                    sh """
-                        echo "Restored dump file:"
-                        ls -lh "${RESTORE_LOCATION}"
-                    """
-
-                    echo "Database restored to: restore_db"
-                    echo "============================================="
+                    echo "===== RESTORE SUMMARY ====="
+                    sh "ls -lh '${RESTORE_LOCATION}'"
                 }
             }
         }
     }
 
-    /* ---------------------- POST EXECUTION ---------------------- */
     post {
         success {
-            echo "🎉 PostgreSQL Restore Pipeline Completed Successfully!"
+            echo "🎉 PostgreSQL Restore Successfully Completed!"
         }
         failure {
-            echo "❌ Restore failed — check Jenkins log above."
+            echo "❌ Restore failed — check errors above."
         }
         always {
             echo "Pipeline execution complete."
