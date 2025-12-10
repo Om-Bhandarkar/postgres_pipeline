@@ -14,7 +14,7 @@ pipeline {
   }
 
   environment {
-    POSTGRES_PASSWORD = "admin123"   
+    POSTGRES_PASSWORD = "admin123"
     POSTGRES_USER = "postgres"
   }
 
@@ -49,74 +49,40 @@ pipeline {
     }
 
     stage('Restore using pg_restore (NO OWNER)') {
-        agent any
-        steps {
-          script {
-            docker.image('postgres:15').inside("--name restore-pg -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} -e POSTGRES_USER=${POSTGRES_USER} -v $WORKSPACE:/backup") {
-      
-              sh '''
-                echo "Waiting for PostgreSQL to start…"
-      
-                for i in {1..20}; do
-                  pg_isready -h localhost -U ${POSTGRES_USER} && break
-                  sleep 2
-                done
-      
-                FILE="/backup/${DB_BACKUP}"
-      
-                echo "Dropping and creating database ${DB_NAME}..."
-                psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
-                  DROP DATABASE IF EXISTS "${DB_NAME}";
-                  CREATE DATABASE "${DB_NAME}";
-      EOF
-      
-                echo "Running pg_restore…"
-      
-                pg_restore \
-                  --no-owner \
-                  --clean \
-                  --if-exists \
-                  -U ${POSTGRES_USER} \
-                  -d ${DB_NAME} \
-                  "$FILE"
-      
-                echo "✔ Restore complete!"
-              '''
-            }
-          }
-        }
-      }
-
-
       steps {
-        sh '''
-          echo "Waiting for PostgreSQL to start…"
+        script {
+          docker.image('postgres:15').inside("--name restore-pg -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} -e POSTGRES_USER=${POSTGRES_USER} -v $WORKSPACE:/backup") {
 
-          for i in {1..20}; do
-            pg_isready -h localhost -U ${POSTGRES_USER} && break
-            sleep 2
-          done
+            sh '''
+              echo "Waiting for PostgreSQL to start…"
 
-          FILE="/backup/${DB_BACKUP}"
+              for i in {1..20}; do
+                pg_isready -h localhost -U ${POSTGRES_USER} && break
+                sleep 2
+              done
 
-          echo "Dropping and creating database ${DB_NAME}..."
-          psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
-            DROP DATABASE IF EXISTS "${DB_NAME}";
-            CREATE DATABASE "${DB_NAME}";
+              FILE="/backup/${DB_BACKUP}"
+
+              echo "Dropping and creating database ${DB_NAME}..."
+              psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
+                DROP DATABASE IF EXISTS "${DB_NAME}";
+                CREATE DATABASE "${DB_NAME}";
 EOF
 
-          echo "Running pg_restore…"
+              echo "Running pg_restore…"
 
-          pg_restore \
-            --no-owner \
-            --clean \
-            --if-exists \
-            -U ${POSTGRES_USER} \
-            -d ${DB_NAME} \
-            "$FILE"
+              pg_restore \
+                --no-owner \
+                --clean \
+                --if-exists \
+                -U ${POSTGRES_USER} \
+                -d ${DB_NAME} \
+                "$FILE"
 
-          echo "✔ Restore complete!"
-        '''
+              echo "✔ Restore complete!"
+            '''
+          }
+        }
       }
     }
 
