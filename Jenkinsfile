@@ -1,152 +1,121 @@
 pipeline {
-    agent any
-    
-    parameters {
-        file(
-            name: 'UPLOADED_BACKUP_FILE',
-            description: 'Upload a backup file to restore'
-        )
+  agent any
+
+  parameters {
+    file(
+      name: 'DB_BACKUP',
+      description: 'Upload PostgreSQL SQL backup file (DBeaver export)'
+    )
+    string(
+      name: 'DB_NAME',
+      defaultValue: 'temp_pg',
+      description: 'Temporary DB name to restore into'
+    )
+  }
+
+  environment {
+    POSTGRES_PASSWORD = credentials('postgres-password-id')
+    POSTGRES_USER = "postgres"
+  }
+
+  stages {
+
+    stage('Prepare workspace') {
+      steps {
+        deleteDir()
+        sh 'echo "Backup file received:" && ls -l'
+      }
     }
-    
-    environment {
-        RESTORE_LOCATION = "${WORKSPACE}/restored_files"
-        BACKUP_LOCATION  = "${WORKSPACE}/backups"
+
+    stage('Validate SQL file') {
+      steps {
+        script {
+          def path = "$WORKSPACE/${params.DB_BACKUP}"
+
+          if (!fileExists(path)) {
+            error "❌ Backup file missing in workspace!"
+          }
+
+          def mime = sh(script: "file -b --mime-type '${path}'", returnStdout: true).trim()
+          echo "Detected MIME type: ${mime}"
+
+          // DBeaver export always = text/sql
+          if (!mime.contains("text")) {
+            error "❌ The uploaded file does not appear to be a valid SQL file!"
+          }
+
+          echo "✔ Valid SQL backup detected (DBeaver export)"
+        }
+      }
     }
-    
-    stages {
-    
-        /* ----------------- INITIALIZE ----------------- */
-        stage('Initialize') {
-            steps {
-                script {
-                    echo "Starting pipeline..."
-                    echo "Workspace: ${WORKSPACE}"
 
-                    // Create folders
-                    sh """
-                        mkdir -p "${RESTORE_LOCATION}"
-                        mkdir -p "${BACKUP_LOCATION}"
-                    """
-
-                    // IMPORTANT FIX – Jenkins stores uploaded file in WORKSPACE
-                    if (params.UPLOADED_BACKUP_FILE) {
-                        echo "File was uploaded → Restore mode"
-                        env.ACTION = "restore"
-
-                        // FIXED PATH
-                        env.UPLOADED_FILE = "${WORKSPACE}/${params.UPLOADED_BACKUP_FILE}"
-
-                        echo "Uploaded file full path: ${env.UPLOADED_FILE}"
-
-                    } else {
-                        echo "No file uploaded → Backup mode"
-                        env.ACTION = "backup"
-                    }
-
-                    env.TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
-                }
-            }
+    stage('Restore SQL backup (NO OWNER mode)') {
+      agent {
+        docker {
+          image 'postgres:15'
+          args """
+            --name temp-postgres
+            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            -e POSTGRES_USER=${POSTGRES_USER}
+            -v $WORKSPACE:/backup
+          """
+          reuseNode true
         }
+      }
 
-        /* --------------- PROCESS STAGE ---------------- */
-        stage('Process') {
-            steps {
-                script {
+      steps {
+        sh '''
+          echo "Starting PostgreSQL…"
+          for i in {1..30}; do
+            pg_isready -h localhost -U "${POSTGRES_USER}" && break
+            sleep 2
+          done
 
-                    /* ============ RESTORE MODE ============ */
-                    if (env.ACTION == "restore") {
+          SQL="/backup/${DB_BACKUP}"
 
-                        echo "Starting RESTORE..."
-                        sh "ls -la ${WORKSPACE}"
+          echo "Dropping and creating database: ${DB_NAME}"
 
-                        // Check file actually exists
-                        sh """
-                            if [ ! -f "${env.UPLOADED_FILE}" ]; then
-                                echo "ERROR: Uploaded file not found at ${env.UPLOADED_FILE}"
-                                exit 1
-                            fi
-                        """
+          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
+            DROP DATABASE IF EXISTS "${DB_NAME}";
+            CREATE DATABASE "${DB_NAME}";
+EOF
 
-                        // Extract or copy file
-                        sh """
-                            if [[ "${env.UPLOADED_FILE}" == *.tar.gz ]] || [[ "${env.UPLOADED_FILE}" == *.tgz ]]; then
-                                echo "Extracting tar.gz..."
-                                tar -xzf "${env.UPLOADED_FILE}" -C "${RESTORE_LOCATION}"
-                                
-                            elif [[ "${env.UPLOADED_FILE}" == *.tar ]]; then
-                                echo "Extracting tar..."
-                                tar -xf "${env.UPLOADED_FILE}" -C "${RESTORE_LOCATION}"
-                                
-                            elif [[ "${env.UPLOADED_FILE}" == *.zip ]]; then
-                                echo "Extracting zip..."
-                                unzip -o "${env.UPLOADED_FILE}" -d "${RESTORE_LOCATION}"
-                                
-                            else
-                                echo "Copying uploaded file as-is..."
-                                cp "${env.UPLOADED_FILE}" "${RESTORE_LOCATION}/"
-                            fi
-                        """
+          export PGDATABASE="${DB_NAME}"
 
-                        echo "✓ Restore completed."
-                        currentBuild.description = "RESTORE completed"
+          echo "Applying NO OWNER mode…"
+          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
+            SET session_replication_role='replica';
+EOF
 
-                    }
-                    
-                    /* ============ BACKUP MODE ============ */
-                    else {
-                        echo "Starting BACKUP..."
+          echo "Restoring SQL file into ${DB_NAME}…"
+          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 -f "$SQL"
 
-                        def backupFileName = "workspace_backup_${env.TIMESTAMP}.tar.gz"
-                        def backupFilePath = "${BACKUP_LOCATION}/${backupFileName}"
+          echo "Restoring normal replication role…"
+          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
+            SET session_replication_role='origin';
+EOF
 
-                        sh """
-                            tar -czf "${backupFilePath}" .
-                            
-                            if [ ! -f "${backupFilePath}" ]; then
-                                echo "Backup failed!"
-                                exit 1
-                            fi
-
-                            echo "✓ Backup created at: ${backupFilePath}"
-                        """
-
-                        env.BACKUP_CREATED = backupFilePath
-                        currentBuild.description = "BACKUP created"
-                    }
-                }
-            }
-        }
-
-        /* ---------------- SUMMARY ---------------- */
-        stage('Summary') {
-            steps {
-                script {
-                    if (env.ACTION == "restore") {
-                        echo "=== RESTORE SUMMARY ==="
-                        sh "ls -la ${RESTORE_LOCATION}"
-                    } else {
-                        echo "=== BACKUP SUMMARY ==="
-                        sh "ls -lh ${env.BACKUP_CREATED}"
-                    }
-                }
-            }
-        }
-
-        /* ---------------- ARCHIVE ---------------- */
-        stage('Archive Backup') {
-            when { expression { env.ACTION == 'backup' } }
-            steps {
-                archiveArtifacts artifacts: "backups/*", fingerprint: true
-            }
-        }
+          echo "✔ Restore complete — NO OWNER applied"
+        '''
+      }
     }
-    
-    post {
-        success {
-            echo "Pipeline completed successfully."
-        }
-        failure {
-            echo "Pipeline FAILED. Check above logs."
-        }
+
+    stage('Sanity check') {
+      steps {
+        sh '''
+          echo "Listing tables in ${DB_NAME} …"
+          psql -U "${POSTGRES_USER}" -d "${DB_NAME}" -c "\\dt"
+        '''
+      }
     }
+  }
+
+  post {
+    always {
+      sh '''
+        echo "Cleaning up PostgreSQL container…"
+        docker rm -f temp-postgres || true
+      '''
+    }
+  }
 }
