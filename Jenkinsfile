@@ -1,107 +1,44 @@
 pipeline {
-  agent any
+    agent any
 
-  parameters {
-    file(
-      name: 'DB_BACKUP',
-      description: 'Upload PostgreSQL Custom Backup File (pg_dump -Fc format)'
-    )
-    string(
-      name: 'DB_NAME',
-      defaultValue: 'temp_pg',
-      description: 'Database name to restore into'
-    )
-  }
-
-  environment {
-    POSTGRES_PASSWORD = "admin123"
-    POSTGRES_USER = "postgres"
-  }
-
-  stages {
-
-    stage('Prepare workspace') {
-      steps {
-        deleteDir()
-        sh 'echo "Backup file received:" && ls -l'
-      }
+    parameters {
+        file(name: 'DUMP_FILE', description: 'Upload your PostgreSQL dump file')
     }
 
-    stage('Validate file is PostgreSQL CUSTOM dump') {
-      steps {
-        script {
-          def filePath = "$WORKSPACE/${params.DB_BACKUP}"
-          if (!fileExists(filePath)) {
-            error "❌ Backup file missing!"
-          }
+    environment {
+        PG_HOST = 'localhost'
+        PG_DB   = 'restore_db'
+    }
 
-          def type = sh(script: "file -b '${filePath}'", returnStdout: true).trim()
-          echo "Detected file type: ${type}"
+    stages {
 
-          if (!type.toLowerCase().contains("postgresql") &&
-              !type.toLowerCase().contains("dump")) {
-            error "❌ This file is NOT a PostgreSQL custom dump!"
-          }
-
-          echo "✔ Custom dump file verified"
+        stage('Copy Dump File') {
+            steps {
+                echo "Copying uploaded dump file to workspace..."
+                sh 'cp "${DUMP_FILE}" dump.sql'
+            }
         }
-      }
-    }
 
-    stage('Restore using pg_restore (NO OWNER)') {
-      steps {
-        script {
-          docker.image('postgres:15').inside("--name restore-pg -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} -e POSTGRES_USER=${POSTGRES_USER} -v $WORKSPACE:/backup") {
+        stage('Restore to PostgreSQL') {
+            environment {
+                DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')  
+            }
 
-            sh '''
-              echo "Waiting for PostgreSQL to start…"
+            steps {
+                echo "Restoring database..."
 
-              for i in {1..20}; do
-                pg_isready -h localhost -U ${POSTGRES_USER} && break
-                sleep 2
-              done
+                sh """
+                    export PGPASSWORD="${DB_CREDS_PSW}"
+                    psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f dump.sql
+                """
 
-              FILE="/backup/${DB_BACKUP}"
-
-              echo "Dropping and creating database ${DB_NAME}..."
-              psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
-                DROP DATABASE IF EXISTS "${DB_NAME}";
-                CREATE DATABASE "${DB_NAME}";
-EOF
-
-              echo "Running pg_restore…"
-
-              pg_restore \
-                --no-owner \
-                --clean \
-                --if-exists \
-                -U ${POSTGRES_USER} \
-                -d ${DB_NAME} \
-                "$FILE"
-
-              echo "✔ Restore complete!"
-            '''
-          }
+                echo "Database restore completed."
+            }
         }
-      }
     }
 
-    stage('Sanity check') {
-      steps {
-        sh '''
-          echo "Tables in ${DB_NAME}:"
-          psql -U ${POSTGRES_USER} -d ${DB_NAME} -c "\\dt"
-        '''
-      }
+    post {
+        success { echo "Pipeline completed successfully!" }
+        failure { echo "Pipeline failed!" }
     }
-  }
-
-  post {
-    always {
-      sh '''
-        echo "Cleaning Docker container…"
-        docker rm -f restore-pg || true
-      '''
-    }
-  }
 }
