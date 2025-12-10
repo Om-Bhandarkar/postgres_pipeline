@@ -24,13 +24,17 @@ pipeline {
                 script {
                     sh "mkdir -p ${BACKUP_LOCATION}"
 
-                    if (params.UPLOADED_BACKUP_FILE) {
+                    // Check if uploaded file actually exists
+                    def uploaded = params.UPLOADED_BACKUP_FILE
+                    def exists = sh(script: "test -f \"${uploaded}\" && echo yes || echo no", returnStdout: true).trim()
+
+                    if (exists == "yes") {
                         echo "Backup file uploaded → RESTORE MODE"
                         env.ACTION = 'restore'
 
-                        // COPY uploaded file to a known, safe path
+                        // Copy uploaded file to a predictable path
                         sh """
-                            cp "${params.UPLOADED_BACKUP_FILE}" "${WORKSPACE}/uploaded_backup_file"
+                            cp "${uploaded}" "${WORKSPACE}/uploaded_backup_file"
                         """
 
                         env.UPLOADED_FILE = "${WORKSPACE}/uploaded_backup_file"
@@ -39,7 +43,6 @@ pipeline {
                         echo "No file uploaded → BACKUP MODE"
                         env.ACTION = 'backup'
 
-                        // Generate timestamp dynamically inside stage (environment block cannot use sh)
                         env.TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
                     }
                 }
@@ -53,7 +56,6 @@ pipeline {
             steps {
                 withCredentials([usernamePassword(credentialsId: PG_CREDS, usernameVariable: 'PGUSER', passwordVariable: 'PGPASSWORD')]) {
                     script {
-                        echo "Restoring PostgreSQL database..."
 
                         sh """
                             set -e
@@ -63,31 +65,28 @@ pipeline {
 
                             FILE="${env.UPLOADED_FILE}"
 
-                            echo "Using uploaded file: \$FILE"
+                            echo "Using uploaded backup: \$FILE"
 
                             case "\$FILE" in
                                 *.sql)
-                                    echo "Detected SQL → using psql"
                                     psql < "\$FILE"
                                     ;;
                                 *.sql.gz)
-                                    echo "Detected SQL.GZ → gunzip + psql"
                                     gunzip -c "\$FILE" | psql
                                     ;;
                                 *.backup|*.dump)
-                                    echo "Detected custom format → pg_restore"
                                     pg_restore -Fc -d "${DB_NAME}" "\$FILE"
                                     ;;
                                 *)
-                                    echo "❌ Unsupported backup file format!"
+                                    echo "❌ Unsupported file format!"
                                     exit 1
                                     ;;
                             esac
 
-                            echo "✔ PostgreSQL Restore Completed"
+                            echo "✔ Restore Completed"
                         """
 
-                        currentBuild.description = "Restored PostgreSQL from uploaded file"
+                        currentBuild.description = "RESTORED using uploaded file"
                     }
                 }
             }
@@ -112,17 +111,10 @@ pipeline {
                             echo "Creating backup: ${backupFileName}"
 
                             pg_dump --format=plain | gzip > "${backupFilePath}"
-
-                            if [ -f "${backupFilePath}" ]; then
-                                echo "✔ Backup created successfully"
-                            else
-                                echo "❌ Backup creation failed"
-                                exit 1
-                            fi
                         """
 
                         env.BACKUP_CREATED = backupFilePath
-                        currentBuild.description = "Backup: ${backupFileName}"
+                        currentBuild.description = "BACKUP: ${backupFileName}"
                     }
                 }
             }
@@ -132,18 +124,16 @@ pipeline {
         stage('Summary') {
             steps {
                 script {
-                    if (env.ACTION == "restore") {
-                        echo "=== RESTORE SUMMARY ==="
-                        echo "Restored file: ${env.UPLOADED_FILE}"
+                    if (env.ACTION == 'restore') {
+                        echo "RESTORED FILE : ${env.UPLOADED_FILE}"
                     } else {
-                        echo "=== BACKUP SUMMARY ==="
-                        echo "Backup created: ${env.BACKUP_CREATED}"
+                        echo "BACKUP CREATED : ${env.BACKUP_CREATED}"
                     }
                 }
             }
         }
 
-        /* ===================== ARCHIVE ===================== */
+        /* ===================== ARCHIVE BACKUP ===================== */
         stage('Archive Backup') {
             when { expression { env.ACTION == 'backup' && env.BACKUP_CREATED } }
 
@@ -154,11 +144,7 @@ pipeline {
     }
 
     post {
-        success {
-            echo "Pipeline Completed Successfully ✔"
-        }
-        failure {
-            echo "Pipeline Failed ❌"
-        }
+        success { echo "Pipeline completed successfully ✔" }
+        failure { echo "Pipeline failed ❌" }
     }
 }
