@@ -11,35 +11,35 @@ pipeline {
         stage('Check Dump File Exists') {
             steps {
                 script {
-                    echo "Checking dump.sql in workspace..."
+                    echo "Checking QA15Sep25 in workspace..."
 
                     sh """
-                        if [ ! -f dump.sql ]; then
-                            echo '❌ ERROR: dump.sql not found in workspace. Please copy the file to the Jenkins workspace.'
+                        if [ ! -f QA15Sep25 ]; then
+                            echo '❌ ERROR: QA15Sep25 file not found in workspace.'
                             exit 1
                         fi
                     """
 
-                    echo "✔ dump.sql found!"
+                    echo "✔ QA15Sep25 found!"
                 }
             }
         }
 
         stage('Restore PostgreSQL') {
             environment {
-                DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')   // ← तुझा credentials ID
+                DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')
             }
 
             steps {
                 script {
-                    echo "Starting restore..."
+                    echo "Restoring database using QA15Sep25..."
 
                     sh """
                         export PGPASSWORD="${DB_CREDS_PSW}"
-                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f dump.sql
+                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f QA15Sep25
                     """
 
-                    echo "✔ Database restore completed!"
+                    echo "✔ Restore complete"
                 }
             }
         }
@@ -51,25 +51,19 @@ pipeline {
 
             steps {
                 script {
-                    echo "Verifying tables in database..."
+                    echo "Verifying restore..."
 
                     sh """
                         export PGPASSWORD="${DB_CREDS_PSW}"
                         psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -c "\\dt"
                     """
-
-                    echo "✔ Verification complete!"
                 }
             }
         }
     }
 
     post {
-        success {
-            echo "🎉 Pipeline completed successfully!"
-        }
-        failure {
-            echo "❌ Pipeline failed. Check logs!"
-        }
+        success { echo "🎉 Pipeline completed successfully!" }
+        failure { echo "❌ Pipeline failed. Check logs!" }
     }
 }
