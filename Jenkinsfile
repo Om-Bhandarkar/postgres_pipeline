@@ -1,119 +1,151 @@
 pipeline {
     agent any
-    
+
     parameters {
-        file(name: 'UPLOADED_BACKUP_FILE', description: 'Upload PostgreSQL backup tar file')
-        string(name: 'DB_NAME', defaultValue: 'your_db', description: 'Database name to restore')
-        string(name: 'DB_USER', defaultValue: 'postgres', description: 'Database user')
-        string(name: 'DB_HOST', defaultValue: 'localhost', description: 'Database host')
-        password(name: 'DB_PASSWORD', description: 'Database password')
+        file(
+            name: '',
+            description: 'Upload a .tar backup file to restore'
+        )
     }
-    
+
     environment {
         RESTORE_LOCATION = "${WORKSPACE}/restored_files/"
         BACKUP_LOCATION = "${WORKSPACE}/backups/"
         TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
-        PGPASSWORD = "${params.DB_PASSWORD}"
     }
-    
+
     stages {
         stage('Initialize') {
             steps {
                 script {
-                    echo "Starting PostgreSQL restore pipeline..."
+                    echo "=== Initializing Pipeline ==="
+                    echo "Workspace: ${WORKSPACE}"
+
+                    // Create directories
                     sh """
-                        mkdir -p "\${BACKUP_LOCATION}" "\${RESTORE_LOCATION}"
-                        echo "Workspace: ${WORKSPACE}"
+                        mkdir -p "${BACKUP_LOCATION}"
+                        mkdir -p "${RESTORE_LOCATION}"
                     """
-                    if (!params.UPLOADED_BACKUP_FILE) {
-                        error "❌ Please upload a backup tar file!"
+
+                    // Detect restore or backup mode
+                    if (params.UPLOADED_BACKUP_FILE) {
+                        echo "File was uploaded → Restore Mode"
+                        env.ACTION = 'restore'
+                        env.UPLOADED_FILE = "${params.UPLOADED_BACKUP_FILE}"
+                    } else {
+                        echo "No file uploaded → Backup Mode"
+                        env.ACTION = 'backup'
                     }
-                    env.ACTION = 'postgres_restore'
                 }
             }
         }
-        
-        stage('Extract Backup Tar') {
+
+        stage('Process Backup / Restore') {
             steps {
-                sh """
-                    echo "📦 Extracting: ${params.UPLOADED_BACKUP_FILE}"
-                    
-                    if [[ "${params.UPLOADED_BACKUP_FILE}" == *.tar.gz ]] || [[ "${params.UPLOADED_BACKUP_FILE}" == *.tgz ]]; then
-                        tar -xzf "${params.UPLOADED_BACKUP_FILE}" -C "\${RESTORE_LOCATION}"
-                    elif [[ "${params.UPLOADED_BACKUP_FILE}" == *.tar ]]; then
-                        tar -xf "${params.UPLOADED_BACKUP_FILE}" -C "\${RESTORE_LOCATION}"
-                    else
-                        echo "❌ Use .tar.gz or .tar"
-                        exit 1
-                    fi
-                    
-                    echo "✅ Extracted:"
-                    ls -la "\${RESTORE_LOCATION}/"
-                """
+                script {
+                    if (env.ACTION == 'restore') {
+
+                        echo "=== RESTORE MODE ==="
+                        echo "Uploaded file: ${params.UPLOADED_BACKUP_FILE}"
+
+                        // Only allow .tar files
+                        sh """
+                            echo "Validating uploaded file..."
+
+                            if [ ! -f "${params.UPLOADED_BACKUP_FILE}" ]; then
+                                echo "✗ ERROR: File not found!"
+                                exit 1
+                            fi
+
+                            case "${params.UPLOADED_BACKUP_FILE}" in
+                                *.tar)
+                                    echo "✓ Valid .tar file detected"
+                                    echo "Extracting..."
+                                    tar -xf "${params.UPLOADED_BACKUP_FILE}" -C "${RESTORE_LOCATION}"
+                                    echo "✓ Restore complete"
+                                    ;;
+                                *)
+                                    echo "✗ ERROR: Only .tar files allowed!"
+                                    echo "You uploaded: ${params.UPLOADED_BACKUP_FILE}"
+                                    exit 1
+                                    ;;
+                            esac
+                        """
+
+                        currentBuild.description = "Restored backup file"
+                    }
+
+                    else {
+
+                        echo "=== BACKUP MODE ==="
+                        def backupFileName = "workspace_backup_${TIMESTAMP}.tar.gz"
+                        def backupFilePath = "${BACKUP_LOCATION}/${backupFileName}"
+
+                        // Create backup of workspace
+                        sh """
+                            echo "Creating backup..."
+                            tar -czf "${backupFilePath}" .
+                            echo "✓ Backup created: ${backupFileName}"
+                        """
+
+                        env.BACKUP_CREATED = backupFilePath
+                        currentBuild.description = "Backup Created: ${backupFileName}"
+                    }
+                }
             }
         }
-        
-        stage('PostgreSQL Restore') {
+
+        stage('Summary') {
             steps {
-                sh """
-                    echo "🔄 Restoring to ${params.DB_NAME}"
-                    
-                    # Drop & recreate DB
-                    dropdb --if-exists "${params.DB_NAME}" -h "${params.DB_HOST}" -U "${params.DB_USER}" || true
-                    createdb "${params.DB_NAME}" -h "${params.DB_HOST}" -U "${params.DB_USER}"
-                    
-                    # Find restore files (FIXED SYNTAX)
-                    RESTORE_FILES=""
-                    if [ -f "\${RESTORE_LOCATION}/dump.sql" ]; then
-                        RESTORE_FILES="\${RESTORE_LOCATION}/dump.sql"
-                    elif [ -f "\${RESTORE_LOCATION}/${params.DB_NAME}.sql" ]; then
-                        RESTORE_FILES="\${RESTORE_LOCATION}/${params.DB_NAME}.sql"
-                    elif ls "\${RESTORE_LOCATION}"/*.sql 2>/dev/null | grep -q .; then
-                        RESTORE_FILES=\$(ls "\${RESTORE_LOCATION}"/*.sql 2>/dev/null | head -1)
-                    elif ls "\${RESTORE_LOCATION}"/*.dump 2>/dev/null | grep -q .; then
-                        RESTORE_FILES=\$(ls "\${RESTORE_LOCATION}"/*.dump 2>/dev/null | head -1)
-                    fi
-                    
-                    if [ -n "\$RESTORE_FILES" ]; then
-                        echo "📊 SQL Restore: \$RESTORE_FILES"
-                        psql -h "${params.DB_HOST}" -U "${params.DB_USER}" -d "${params.DB_NAME}" -f "\$RESTORE_FILES"
-                    else
-                        # pg_dump binary format
-                        DUMP_FILE=\$(ls "\${RESTORE_LOCATION}"/*.dump "\${RESTORE_LOCATION}"/*.backup 2>/dev/null 2>&1 | head -1)
-                        if [ -n "\$DUMP_FILE" ]; then
-                            echo "📦 pg_restore: \$DUMP_FILE"
-                            pg_restore --verbose --clean --no-acl --no-owner \\
-                                -h "${params.DB_HOST}" -U "${params.DB_USER}" -d "${params.DB_NAME}" "\$DUMP_FILE"
-                        else
-                            echo "❌ No PostgreSQL files found!"
-                            find "\${RESTORE_LOCATION}" -type f
-                            exit 1
-                        fi
-                    fi
-                    
-                    echo "🎉 Restore completed!"
-                """
+                script {
+                    if (env.ACTION == 'restore') {
+                        echo "=== RESTORE SUMMARY ==="
+                        sh """
+                            echo "Restored files:"
+                            ls -lh "${RESTORE_LOCATION}"
+                        """
+                    } else {
+                        echo "=== BACKUP SUMMARY ==="
+                        echo "Backup file: ${env.BACKUP_CREATED}"
+                        sh "ls -lh ${env.BACKUP_CREATED}"
+                    }
+                }
             }
         }
-        
-        stage('Verification') {
+
+        stage('Archive Artifacts') {
             steps {
-                sh """
-                    echo "🔍 Verifying ${params.DB_NAME}..."
-                    psql -h "${params.DB_HOST}" -U "${params.DB_USER}" -d "${params.DB_NAME}" \\
-                        -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';" -t -A
-                """
+                script {
+                    if (env.ACTION == 'backup') {
+                        echo "Archiving backup artifact..."
+                        archiveArtifacts artifacts: "backups/*.tar.gz", fingerprint: true
+                    }
+                }
             }
         }
     }
-    
+
     post {
         success {
-            currentBuild.description = "PostgreSQL restored: ${params.DB_NAME}"
-            echo "✅ Database restored: ${params.DB_NAME}@${params.DB_HOST}"
+            script {
+                echo "✔ Pipeline completed successfully!"
+
+                if (env.ACTION == 'backup') {
+                    echo "Download backup at:"
+                    echo "${BUILD_URL}artifact/backups/"
+                } else {
+                    echo "Restored files are available at:"
+                    echo "${RESTORE_LOCATION}"
+                }
+            }
         }
+
         failure {
-            echo "❌ Restore failed!"
+            echo "✗ Pipeline failed — check console logs!"
+        }
+
+        always {
+            echo "=== Pipeline End ==="
         }
     }
 }
