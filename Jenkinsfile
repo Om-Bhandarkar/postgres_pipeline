@@ -3,7 +3,7 @@ pipeline {
 
     parameters {
         file(
-            name: 'UPLOADED_BACKUP_FILE',
+            
             description: 'Upload a PostgreSQL backup file to restore'
         )
     }
