@@ -4,17 +4,17 @@ pipeline {
   parameters {
     file(
       name: 'DB_BACKUP',
-      description: 'Upload PostgreSQL SQL backup file (DBeaver export)'
+      description: 'Upload PostgreSQL Custom Backup File (pg_dump -Fc format)'
     )
     string(
       name: 'DB_NAME',
       defaultValue: 'temp_pg',
-      description: 'Temporary DB name to restore into'
+      description: 'Database name to restore into'
     )
   }
 
   environment {
-    POSTGRES_PASSWORD = credentials('postgres-password-id')
+    POSTGRES_PASSWORD = "admin123"   
     POSTGRES_USER = "postgres"
   }
 
@@ -27,34 +27,33 @@ pipeline {
       }
     }
 
-    stage('Validate SQL file') {
+    stage('Validate file is PostgreSQL CUSTOM dump') {
       steps {
         script {
-          def path = "$WORKSPACE/${params.DB_BACKUP}"
-
-          if (!fileExists(path)) {
-            error "❌ Backup file missing in workspace!"
+          def filePath = "$WORKSPACE/${params.DB_BACKUP}"
+          if (!fileExists(filePath)) {
+            error "❌ Backup file missing!"
           }
 
-          def mime = sh(script: "file -b --mime-type '${path}'", returnStdout: true).trim()
-          echo "Detected MIME type: ${mime}"
+          def type = sh(script: "file -b '${filePath}'", returnStdout: true).trim()
+          echo "Detected file type: ${type}"
 
-          // DBeaver export always = text/sql
-          if (!mime.contains("text")) {
-            error "❌ The uploaded file does not appear to be a valid SQL file!"
+          if (!type.toLowerCase().contains("postgresql") &&
+              !type.toLowerCase().contains("dump")) {
+            error "❌ This file is NOT a PostgreSQL custom dump!"
           }
 
-          echo "✔ Valid SQL backup detected (DBeaver export)"
+          echo "✔ Custom dump file verified"
         }
       }
     }
 
-    stage('Restore SQL backup (NO OWNER mode)') {
+    stage('Restore using pg_restore (NO OWNER)') {
       agent {
         docker {
           image 'postgres:15'
           args """
-            --name temp-postgres
+            --name restore-pg
             -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
             -e POSTGRES_USER=${POSTGRES_USER}
             -v $WORKSPACE:/backup
@@ -65,37 +64,32 @@ pipeline {
 
       steps {
         sh '''
-          echo "Starting PostgreSQL…"
-          for i in {1..30}; do
-            pg_isready -h localhost -U "${POSTGRES_USER}" && break
+          echo "Waiting for PostgreSQL to start…"
+
+          for i in {1..20}; do
+            pg_isready -h localhost -U ${POSTGRES_USER} && break
             sleep 2
           done
 
-          SQL="/backup/${DB_BACKUP}"
+          FILE="/backup/${DB_BACKUP}"
 
-          echo "Dropping and creating database: ${DB_NAME}"
-
-          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
+          echo "Dropping and creating database ${DB_NAME}..."
+          psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
             DROP DATABASE IF EXISTS "${DB_NAME}";
             CREATE DATABASE "${DB_NAME}";
 EOF
 
-          export PGDATABASE="${DB_NAME}"
+          echo "Running pg_restore…"
 
-          echo "Applying NO OWNER mode…"
-          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
-            SET session_replication_role='replica';
-EOF
+          pg_restore \
+            --no-owner \
+            --clean \
+            --if-exists \
+            -U ${POSTGRES_USER} \
+            -d ${DB_NAME} \
+            "$FILE"
 
-          echo "Restoring SQL file into ${DB_NAME}…"
-          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 -f "$SQL"
-
-          echo "Restoring normal replication role…"
-          psql -U "${POSTGRES_USER}" --variable=ON_ERROR_STOP=1 <<EOF
-            SET session_replication_role='origin';
-EOF
-
-          echo "✔ Restore complete — NO OWNER applied"
+          echo "✔ Restore complete!"
         '''
       }
     }
@@ -103,8 +97,8 @@ EOF
     stage('Sanity check') {
       steps {
         sh '''
-          echo "Listing tables in ${DB_NAME} …"
-          psql -U "${POSTGRES_USER}" -d "${DB_NAME}" -c "\\dt"
+          echo "Tables in ${DB_NAME}:"
+          psql -U ${POSTGRES_USER} -d ${DB_NAME} -c "\\dt"
         '''
       }
     }
@@ -113,8 +107,8 @@ EOF
   post {
     always {
       sh '''
-        echo "Cleaning up PostgreSQL container…"
-        docker rm -f temp-postgres || true
+        echo "Cleaning Docker container…"
+        docker rm -f restore-pg || true
       '''
     }
   }
