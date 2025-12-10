@@ -14,10 +14,18 @@ pipeline {
 
         stage('Copy Dump File') {
             steps {
-                echo "Copying uploaded dump file to workspace..."
-                sh 'cp "${DUMP_FILE}" dump.sql'
+                script {
+                    echo "Uploaded file path: ${params.DUMP_FILE}"
+        
+                    sh """
+                        cp "${params.DUMP_FILE}" dump.sql
+                    """
+        
+                    echo "File copied."
+                }
             }
         }
+
 
         stage('Restore to PostgreSQL') {
             environment {
