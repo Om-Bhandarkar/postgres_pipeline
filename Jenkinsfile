@@ -12,20 +12,32 @@ pipeline {
 
     stages {
 
-        stage('Copy Dump File') {
+        stage('Show Uploaded File Path') {
             steps {
                 script {
-                    echo "Uploaded file path: ${params.DUMP_FILE}"
-        
-                    sh """
-                        cp "${params.DUMP_FILE}" dump.sql
-                    """
-        
-                    echo "File copied."
+                    echo "Jenkins uploaded file path = ${params.DUMP_FILE}"
+
+                    if (!params.DUMP_FILE) {
+                        error "❌ ERROR: No dump file uploaded. Please upload a .sql or .dump file."
+                    }
                 }
             }
         }
 
+        stage('Copy Dump File') {
+            steps {
+                script {
+                    echo "Copying uploaded dump file to workspace..."
+
+                    // Correct and safe copy (works in all Jenkins versions)
+                    sh """
+                        cp "${params.DUMP_FILE}" ./dump.sql
+                    """
+
+                    echo "✔ File copied as dump.sql"
+                }
+            }
+        }
 
         stage('Restore to PostgreSQL') {
             environment {
@@ -33,20 +45,43 @@ pipeline {
             }
 
             steps {
-                echo "Restoring database..."
+                script {
+                    echo "Restoring database..."
 
-                sh """
-                    export PGPASSWORD="${DB_CREDS_PSW}"
-                    psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f dump.sql
-                """
+                    sh """
+                        export PGPASSWORD="${DB_CREDS_PSW}"
+                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f dump.sql
+                    """
 
-                echo "Database restore completed."
+                    echo "✔ Database restore completed."
+                }
+            }
+        }
+
+        stage('Verify Restore') {
+            environment {
+                DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')
+            }
+
+            steps {
+                script {
+                    echo "Verifying DB restore..."
+
+                    sh """
+                        export PGPASSWORD="${DB_CREDS_PSW}"
+                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -c "\\dt"
+                    """
+                }
             }
         }
     }
 
     post {
-        success { echo "Pipeline completed successfully!" }
-        failure { echo "Pipeline failed!" }
+        success {
+            echo "🎉 Pipeline completed successfully!"
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+        }
     }
 }
