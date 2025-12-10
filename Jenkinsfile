@@ -1,26 +1,32 @@
 pipeline {
     agent any
 
+    parameters {
+        file(name: 'BACKUP_FILE', description: 'Upload PostgreSQL backup file')
+    }
+
     environment {
         PG_HOST = 'localhost'
+        PG_PORT = '5433'
         PG_DB   = 'restore_db'
     }
 
     stages {
 
-        stage('Check Dump File Exists') {
+        stage('Receive Backup File') {
             steps {
                 script {
-                    echo "Checking QA15Sep25 in workspace..."
+                    echo "Receiving uploaded backup file..."
 
+                    // Uploaded file is placed automatically in workspace
                     sh """
-                        if [ ! -f QA15Sep25 ]; then
-                            echo '❌ ERROR: QA15Sep25 file not found in workspace.'
+                        if [ ! -f "${params.BACKUP_FILE}" ]; then
+                            echo '❌ ERROR: Backup file not uploaded or not found.'
                             exit 1
                         fi
                     """
 
-                    echo "✔ QA15Sep25 found!"
+                    echo "✔ Backup file received: ${params.BACKUP_FILE}"
                 }
             }
         }
@@ -29,17 +35,16 @@ pipeline {
             environment {
                 DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')
             }
-
             steps {
                 script {
-                    echo "Restoring database using QA15Sep25..."
+                    echo "Restoring database from uploaded file..."
 
                     sh """
                         export PGPASSWORD="${DB_CREDS_PSW}"
-                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -f QA15Sep25
+                        psql -h ${PG_HOST} -p ${PG_PORT} -U ${DB_CREDS_USR} -d ${PG_DB} -f "${params.BACKUP_FILE}"
                     """
 
-                    echo "✔ Restore complete"
+                    echo "✔ Database Restore Complete"
                 }
             }
         }
@@ -48,14 +53,13 @@ pipeline {
             environment {
                 DB_CREDS = credentials('a5bde45d-3b6d-495d-a022-14f7f3f977ba')
             }
-
             steps {
                 script {
                     echo "Verifying restore..."
 
                     sh """
                         export PGPASSWORD="${DB_CREDS_PSW}"
-                        psql -h ${PG_HOST} -U ${DB_CREDS_USR} -d ${PG_DB} -c "\\dt"
+                        psql -h ${PG_HOST} -p ${PG_PORT} -U ${DB_CREDS_USR} -d ${PG_DB} -c "\\dt"
                     """
                 }
             }
