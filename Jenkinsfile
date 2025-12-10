@@ -49,18 +49,44 @@ pipeline {
     }
 
     stage('Restore using pg_restore (NO OWNER)') {
-      agent {
-        docker {
-          image 'postgres:15'
-          args """
-            --name restore-pg
-            -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-            -e POSTGRES_USER=${POSTGRES_USER}
-            -v $WORKSPACE:/backup
-          """
-          reuseNode true
+        agent any
+        steps {
+          script {
+            docker.image('postgres:15').inside("--name restore-pg -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} -e POSTGRES_USER=${POSTGRES_USER} -v $WORKSPACE:/backup") {
+      
+              sh '''
+                echo "Waiting for PostgreSQL to start…"
+      
+                for i in {1..20}; do
+                  pg_isready -h localhost -U ${POSTGRES_USER} && break
+                  sleep 2
+                done
+      
+                FILE="/backup/${DB_BACKUP}"
+      
+                echo "Dropping and creating database ${DB_NAME}..."
+                psql -U ${POSTGRES_USER} --variable=ON_ERROR_STOP=1 <<EOF
+                  DROP DATABASE IF EXISTS "${DB_NAME}";
+                  CREATE DATABASE "${DB_NAME}";
+      EOF
+      
+                echo "Running pg_restore…"
+      
+                pg_restore \
+                  --no-owner \
+                  --clean \
+                  --if-exists \
+                  -U ${POSTGRES_USER} \
+                  -d ${DB_NAME} \
+                  "$FILE"
+      
+                echo "✔ Restore complete!"
+              '''
+            }
+          }
         }
       }
+
 
       steps {
         sh '''
