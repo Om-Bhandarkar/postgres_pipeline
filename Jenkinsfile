@@ -3,7 +3,7 @@ pipeline {
 
     parameters {
         file(
-            
+            name: 'UPLOADED_BACKUP_FILE',
             description: 'Upload a PostgreSQL backup file to restore'
         )
     }
@@ -24,17 +24,19 @@ pipeline {
                 script {
                     sh "mkdir -p ${BACKUP_LOCATION}"
 
-                    // Check if uploaded file actually exists
-                    def uploaded = params.UPLOADED_BACKUP_FILE
-                    def exists = sh(script: "test -f \"${uploaded}\" && echo yes || echo no", returnStdout: true).trim()
+                    // Jenkins puts uploaded file at: $WORKSPACE/<parameterName>
+                    def uploadedFilePath = "${WORKSPACE}/${params.UPLOADED_BACKUP_FILE}"
+
+                    // Check file exists
+                    def exists = sh(script: "test -f \"${uploadedFilePath}\" && echo yes || echo no", returnStdout: true).trim()
 
                     if (exists == "yes") {
                         echo "Backup file uploaded → RESTORE MODE"
                         env.ACTION = 'restore'
 
-                        // Copy uploaded file to a predictable path
+                        // Copy uploaded file to fixed predictable name
                         sh """
-                            cp "${uploaded}" "${WORKSPACE}/uploaded_backup_file"
+                            cp "${uploadedFilePath}" "${WORKSPACE}/uploaded_backup_file"
                         """
 
                         env.UPLOADED_FILE = "${WORKSPACE}/uploaded_backup_file"
@@ -42,7 +44,6 @@ pipeline {
                     } else {
                         echo "No file uploaded → BACKUP MODE"
                         env.ACTION = 'backup'
-
                         env.TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
                     }
                 }
@@ -56,7 +57,6 @@ pipeline {
             steps {
                 withCredentials([usernamePassword(credentialsId: PG_CREDS, usernameVariable: 'PGUSER', passwordVariable: 'PGPASSWORD')]) {
                     script {
-
                         sh """
                             set -e
                             export PGHOST=${DB_HOST}
@@ -65,16 +65,19 @@ pipeline {
 
                             FILE="${env.UPLOADED_FILE}"
 
-                            echo "Using uploaded backup: \$FILE"
+                            echo "Using uploaded backup file: \$FILE"
 
                             case "\$FILE" in
                                 *.sql)
+                                    echo "Restoring plain .sql file"
                                     psql < "\$FILE"
                                     ;;
                                 *.sql.gz)
+                                    echo "Restoring gzip-compressed .sql.gz"
                                     gunzip -c "\$FILE" | psql
                                     ;;
                                 *.backup|*.dump)
+                                    echo "Restoring pg_dump custom format"
                                     pg_restore -Fc -d "${DB_NAME}" "\$FILE"
                                     ;;
                                 *)
@@ -83,10 +86,10 @@ pipeline {
                                     ;;
                             esac
 
-                            echo "✔ Restore Completed"
+                            echo "✔ PostgreSQL Restore Completed"
                         """
 
-                        currentBuild.description = "RESTORED using uploaded file"
+                        currentBuild.description = "RESTORE: ${env.UPLOADED_FILE}"
                     }
                 }
             }
@@ -109,7 +112,6 @@ pipeline {
                             export PGDATABASE=${DB_NAME}
 
                             echo "Creating backup: ${backupFileName}"
-
                             pg_dump --format=plain | gzip > "${backupFilePath}"
                         """
 
@@ -144,7 +146,7 @@ pipeline {
     }
 
     post {
-        success { echo "Pipeline completed successfully ✔" }
-        failure { echo "Pipeline failed ❌" }
+        success { echo "✔ Pipeline Completed Successfully" }
+        failure { echo "❌ Pipeline Failed" }
     }
 }
