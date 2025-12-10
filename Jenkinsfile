@@ -2,154 +2,59 @@ pipeline {
     agent any
 
     parameters {
-        file(
-            name: 'UPLOADED_BACKUP_FILE',
-            description: 'Upload a PostgreSQL backup file to restore'
-        )
+        // User will upload the backup file when running the job
+        file(name: '', description: 'Upload PostgreSQL backup file (.sql or .dump)')
     }
 
     environment {
-        BACKUP_LOCATION = "${WORKSPACE}/backups/"
-        TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
-        DB_NAME = "postgres"        // Change DB name if needed
-        DB_HOST = "localhost"
-        DB_PORT = "5432"
-        PG_CREDS = "0a5c8c57-970e-40bf-8058-37555d6a2a52"
+        // DB Config
+        PG_HOST = "localhost"
+        PG_PORT = "5432"
+        PG_USER = "postgres"
+        PG_DB   = "restore_db"
     }
 
     stages {
-
-        /* ===================== INIT ===================== */
-        stage('Initialize') {
+        stage('Copy Backup File to Temp Location') {
             steps {
                 script {
-                    echo "Workspace: ${WORKSPACE}"
+                    echo "Copying backup file to workspace..."
 
-                    sh "mkdir -p ${BACKUP_LOCATION}"
+                    // Jenkins automatically stores uploaded file into params.DB_BACKUP_FILE
+                    backupFilePath = "${workspace}/${params.DB_BACKUP_FILE}"
 
-                    if (params.UPLOADED_BACKUP_FILE) {
-                        echo "Backup file uploaded → RESTORE MODE"
-                        env.ACTION = 'restore'
-                        env.UPLOADED_FILE = "${params.UPLOADED_BACKUP_FILE}"
-                    } else {
-                        echo "No file uploaded → BACKUP MODE"
-                        env.ACTION = 'backup'
-                    }
+                    sh "cp '${params.DB_BACKUP_FILE}' '${backupFilePath}'"
+
+                    echo "Backup file saved at: ${backupFilePath}"
                 }
             }
         }
 
-        /* ===================== RESTORE ===================== */
-        stage('Restore PostgreSQL Backup') {
-            when { expression { env.ACTION == 'restore' } }
-
-            steps {
-                withCredentials([usernamePassword(credentialsId: "${PG_CREDS}", usernameVariable: 'PGUSER', passwordVariable: 'PGPASSWORD')]) {
-                    script {
-                        echo "Restoring PostgreSQL database using uploaded file..."
-
-                        sh """
-                            export PGHOST=${DB_HOST}
-                            export PGPORT=${DB_PORT}
-                            export PGDATABASE=${DB_NAME}
-
-                            echo "Uploaded: ${UPLOADED_FILE}"
-
-                            if [[ "${UPLOADED_FILE}" == *.sql ]]; then
-                                echo "Detected .sql → Restoring with psql"
-                                psql < "${UPLOADED_FILE}"
-
-                            elif [[ "${UPLOADED_FILE}" == *.sql.gz ]]; then
-                                echo "Detected .sql.gz → gunzip + psql"
-                                gunzip -c "${UPLOADED_FILE}" | psql
-
-                            elif [[ "${UPLOADED_FILE}" == *.backup || "${UPLOADED_FILE}" == *.dump ]]; then
-                                echo "Detected custom-format → pg_restore"
-                                pg_restore -Fc -d "${DB_NAME}" "${UPLOADED_FILE}"
-
-                            else
-                                echo "❌ Unsupported backup file format!"
-                                exit 1
-                            fi
-
-                            echo "✔ PostgreSQL Restore Completed"
-                        """
-
-                        currentBuild.description = "Restored PostgreSQL DB"
-                    }
-                }
-            }
-        }
-
-        /* ===================== BACKUP ===================== */
-        stage('Create PostgreSQL Backup') {
-            when { expression { env.ACTION == 'backup' } }
-
-            steps {
-                withCredentials([usernamePassword(credentialsId: "${PG_CREDS}", usernameVariable: 'PGUSER', passwordVariable: 'PGPASSWORD')]) {
-                    script {
-
-                        def backupFileName = "postgres_backup_${TIMESTAMP}.sql.gz"
-                        def backupFilePath = "${BACKUP_LOCATION}/${backupFileName}"
-
-                        echo "Creating backup: ${backupFileName}"
-
-                        sh """
-                            export PGHOST=${DB_HOST}
-                            export PGPORT=${DB_PORT}
-                            export PGDATABASE=${DB_NAME}
-
-                            echo "Running pg_dump..."
-                            pg_dump --format=plain | gzip > "${backupFilePath}"
-
-                            if [ -f "${backupFilePath}" ]; then
-                                echo "✔ Backup created successfully"
-                                echo "Location: ${backupFilePath}"
-                            else
-                                echo "❌ Backup failed"
-                                exit 1
-                            fi
-                        """
-
-                        env.BACKUP_CREATED = backupFilePath
-                        currentBuild.description = "Backup: ${backupFileName}"
-                    }
-                }
-            }
-        }
-
-        /* ===================== SUMMARY ===================== */
-        stage('Summary') {
+        stage('Restore Database') {
             steps {
                 script {
-                    if (env.ACTION == "restore") {
-                        echo "=== RESTORE SUMMARY ==="
-                        echo "Restored file: ${env.UPLOADED_FILE}"
+                    echo "Restoring PostgreSQL database..."
+
+                    // Detect if file is .sql or .dump
+                    if (backupFilePath.endsWith(".sql")) {
+                        sh """
+                            PGPASSWORD=${PG_PASSWORD} psql \
+                            -h ${PG_HOST} -p ${PG_PORT} -U ${PG_USER} -d ${PG_DB} \
+                            -f '${backupFilePath}'
+                        """
                     } else {
-                        echo "=== BACKUP SUMMARY ==="
-                        echo "Backup created: ${env.BACKUP_CREATED}"
+                        // For .dump file
+                        sh """
+                            PGPASSWORD=${PG_PASSWORD} pg_restore \
+                            -h ${PG_HOST} -p ${PG_PORT} -U ${PG_USER} -d ${PG_DB} \
+                            '${backupFilePath}'
+                        """
                     }
+
+                    echo "Database restore complete."
                 }
             }
-        }
-
-        /* ===================== ARCHIVE ===================== */
-        stage('Archive Backup') {
-            when { expression { env.ACTION == 'backup' && env.BACKUP_CREATED } }
-
-            steps {
-                archiveArtifacts artifacts: "backups/*.gz", fingerprint: true
-            }
-        }
-    }
-
-    /* ===================== POST ACTIONS ===================== */
-    post {
-        success {
-            echo "Pipeline Completed Successfully ✔"
-        }
-        failure {
-            echo "Pipeline Failed ❌"
         }
     }
 }
+
