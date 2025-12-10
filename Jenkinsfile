@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        file(name: 'BACKUP_FILE', description: 'Upload PostgreSQL backup file')
+        file(description: 'Upload PostgreSQL backup file')
     }
 
     environment {
