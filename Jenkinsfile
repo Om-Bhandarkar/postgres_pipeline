@@ -1,94 +1,152 @@
 pipeline {
     agent any
-
+    
     parameters {
         file(
             name: 'UPLOADED_BACKUP_FILE',
-            description: 'Upload your PostgreSQL .dump file to restore'
+            description: 'Upload a backup file to restore'
         )
     }
-
+    
     environment {
         RESTORE_LOCATION = "${WORKSPACE}/restored_files"
+        BACKUP_LOCATION  = "${WORKSPACE}/backups"
     }
-
+    
     stages {
-
+    
+        /* ----------------- INITIALIZE ----------------- */
         stage('Initialize') {
             steps {
                 script {
-                    echo "Initializing PostgreSQL Restore Pipeline..."
+                    echo "Starting pipeline..."
                     echo "Workspace: ${WORKSPACE}"
 
-                    sh "mkdir -p '${RESTORE_LOCATION}'"
+                    // Create folders
+                    sh """
+                        mkdir -p "${RESTORE_LOCATION}"
+                        mkdir -p "${BACKUP_LOCATION}"
+                    """
 
-                    // FILE PARAM FIX — Correct full path
-                    if (!params.UPLOADED_BACKUP_FILE) {
-                        error "❌ No backup file uploaded. Upload a .dump file and try again."
+                    // IMPORTANT FIX – Jenkins stores uploaded file in WORKSPACE
+                    if (params.UPLOADED_BACKUP_FILE) {
+                        echo "File was uploaded → Restore mode"
+                        env.ACTION = "restore"
+
+                        // FIXED PATH
+                        env.UPLOADED_FILE = "${WORKSPACE}/${params.UPLOADED_BACKUP_FILE}"
+
+                        echo "Uploaded file full path: ${env.UPLOADED_FILE}"
+
+                    } else {
+                        echo "No file uploaded → Backup mode"
+                        env.ACTION = "backup"
                     }
 
-                    // FULL PATH OF THE UPLOADED FILE
-                    env.UPLOADED_FILE = "${WORKSPACE}/${params.UPLOADED_BACKUP_FILE}"
-
-                    echo "Uploaded file name: ${params.UPLOADED_BACKUP_FILE}"
-                    echo "Full file path: ${env.UPLOADED_FILE}"
-
-                    // timestamp
                     env.TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
                 }
             }
         }
 
-        stage('Restore Database') {
+        /* --------------- PROCESS STAGE ---------------- */
+        stage('Process') {
             steps {
                 script {
-                    if (!env.UPLOADED_FILE.endsWith(".dump")) {
-                        error "❌ Only .dump PostgreSQL backup files are supported."
+
+                    /* ============ RESTORE MODE ============ */
+                    if (env.ACTION == "restore") {
+
+                        echo "Starting RESTORE..."
+                        sh "ls -la ${WORKSPACE}"
+
+                        // Check file actually exists
+                        sh """
+                            if [ ! -f "${env.UPLOADED_FILE}" ]; then
+                                echo "ERROR: Uploaded file not found at ${env.UPLOADED_FILE}"
+                                exit 1
+                            fi
+                        """
+
+                        // Extract or copy file
+                        sh """
+                            if [[ "${env.UPLOADED_FILE}" == *.tar.gz ]] || [[ "${env.UPLOADED_FILE}" == *.tgz ]]; then
+                                echo "Extracting tar.gz..."
+                                tar -xzf "${env.UPLOADED_FILE}" -C "${RESTORE_LOCATION}"
+                                
+                            elif [[ "${env.UPLOADED_FILE}" == *.tar ]]; then
+                                echo "Extracting tar..."
+                                tar -xf "${env.UPLOADED_FILE}" -C "${RESTORE_LOCATION}"
+                                
+                            elif [[ "${env.UPLOADED_FILE}" == *.zip ]]; then
+                                echo "Extracting zip..."
+                                unzip -o "${env.UPLOADED_FILE}" -d "${RESTORE_LOCATION}"
+                                
+                            else
+                                echo "Copying uploaded file as-is..."
+                                cp "${env.UPLOADED_FILE}" "${RESTORE_LOCATION}/"
+                            fi
+                        """
+
+                        echo "✓ Restore completed."
+                        currentBuild.description = "RESTORE completed"
+
                     }
+                    
+                    /* ============ BACKUP MODE ============ */
+                    else {
+                        echo "Starting BACKUP..."
 
-                    sh """
-                        echo "Checking if uploaded .dump file exists..."
-                        ls -lh "${env.UPLOADED_FILE}" || (echo "File not found!" && exit 1)
+                        def backupFileName = "workspace_backup_${env.TIMESTAMP}.tar.gz"
+                        def backupFilePath = "${BACKUP_LOCATION}/${backupFileName}"
 
-                        echo "Copying dump file to restore folder..."
-                        cp "${env.UPLOADED_FILE}" "${RESTORE_LOCATION}/restore.dump"
+                        sh """
+                            tar -czf "${backupFilePath}" .
+                            
+                            if [ ! -f "${backupFilePath}" ]; then
+                                echo "Backup failed!"
+                                exit 1
+                            fi
 
-                        echo "Ensuring restore_db exists..."
-                        PGPASSWORD='mypassword' createdb -U postgres restore_db || echo "DB already exists"
+                            echo "✓ Backup created at: ${backupFilePath}"
+                        """
 
-                        echo "Running PostgreSQL restore..."
-                        PGPASSWORD='mypassword' pg_restore \
-                            --no-owner \
-                            --role=postgres \
-                            -U postgres \
-                            -d restore_db \
-                            "${RESTORE_LOCATION}/restore.dump"
-
-                        echo "✓ Restore Completed Successfully"
-                    """
+                        env.BACKUP_CREATED = backupFilePath
+                        currentBuild.description = "BACKUP created"
+                    }
                 }
             }
         }
 
+        /* ---------------- SUMMARY ---------------- */
         stage('Summary') {
             steps {
                 script {
-                    echo "===== RESTORE SUMMARY ====="
-                    sh "ls -lh '${RESTORE_LOCATION}'"
+                    if (env.ACTION == "restore") {
+                        echo "=== RESTORE SUMMARY ==="
+                        sh "ls -la ${RESTORE_LOCATION}"
+                    } else {
+                        echo "=== BACKUP SUMMARY ==="
+                        sh "ls -lh ${env.BACKUP_CREATED}"
+                    }
                 }
             }
         }
-    }
 
+        /* ---------------- ARCHIVE ---------------- */
+        stage('Archive Backup') {
+            when { expression { env.ACTION == 'backup' } }
+            steps {
+                archiveArtifacts artifacts: "backups/*", fingerprint: true
+            }
+        }
+    }
+    
     post {
         success {
-            echo "🎉 PostgreSQL Restore Successfully Completed!"
+            echo "Pipeline completed successfully."
         }
         failure {
-            echo "❌ Restore failed — check errors above."
-        }
-        always {
-            echo "Pipeline execution complete."
+            echo "Pipeline FAILED. Check above logs."
         }
     }
 }
