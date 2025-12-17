@@ -10,18 +10,24 @@ pipeline {
 
     stages {
 
-        stage('Validate Backup File') {
+        stage('Prepare Backup File (Copy to Workspace)') {
             steps {
                 sh '''
                     if [ ! -f "$DB_BACKUP" ]; then
                         echo "❌ ERROR: No backup file uploaded."
-                        echo "➡ Use 'Build with Parameters' and upload a backup file."
                         exit 1
                     fi
 
-                    echo "Backup file details:"
-                    ls -lh "$DB_BACKUP"
-                    file "$DB_BACKUP"
+                    BACKUP_FILE_NAME=$(basename "$DB_BACKUP")
+
+                    echo "📦 Uploaded file path: $DB_BACKUP"
+                    echo "📂 Copying to workspace as: $BACKUP_FILE_NAME"
+
+                    cp "$DB_BACKUP" "$BACKUP_FILE_NAME"
+
+                    echo "✅ File now present in workspace:"
+                    ls -lh "$BACKUP_FILE_NAME"
+                    file "$BACKUP_FILE_NAME"
                 '''
             }
         }
@@ -36,12 +42,14 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                        set +e   # IMPORTANT: allow pg_restore warnings
+                        set +e
                         export PGPASSWORD="$DB_PASS"
 
-                        echo "Restoring database '$DB_NAME' on $DB_HOST:$DB_PORT"
-                        echo "Using DB user: $DB_USER"
-                        echo "Starting pg_restore (warnings will NOT fail the build)"
+                        BACKUP_FILE_NAME=$(basename "$DB_BACKUP")
+
+                        echo "🔄 Restoring database '$DB_NAME'"
+                        echo "👤 DB User: $DB_USER"
+                        echo "📄 Backup file: $BACKUP_FILE_NAME"
 
                         pg_restore \
                           -h "$DB_HOST" \
@@ -53,12 +61,12 @@ pipeline {
                           --no-owner \
                           --no-privileges \
                           --verbose \
-                          "$DB_BACKUP"
+                          "$BACKUP_FILE_NAME"
 
                         EXIT_CODE=$?
 
                         if [ $EXIT_CODE -ne 0 ]; then
-                            echo "⚠️ pg_restore finished with warnings (exit code=$EXIT_CODE)"
+                            echo "⚠️ pg_restore completed with warnings (exit code=$EXIT_CODE)"
                             echo "✔ Treating restore as SUCCESS"
                         fi
 
