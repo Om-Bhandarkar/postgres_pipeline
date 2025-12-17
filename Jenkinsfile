@@ -10,24 +10,25 @@ pipeline {
 
     stages {
 
-        stage('Debug & Prepare Backup File') {
+        stage('Prepare Backup File (Preserve Original Name)') {
             steps {
                 sh '''
-                    echo "=== DEBUG INFO ==="
-                    echo "DB_BACKUP value: $DB_BACKUP"
-                    echo "WORKSPACE: $WORKSPACE"
-                    echo "Listing workspace:"
-                    ls -lh .
+                    echo "🔍 DB_BACKUP path: $DB_BACKUP"
 
                     if [ ! -f "$DB_BACKUP" ]; then
-                        echo "❌ ERROR: Backup file NOT found in workspace."
-                        echo "➡ You MUST click 'Build with Parameters' and upload the file."
+                        echo "❌ ERROR: Backup file not found"
                         exit 1
                     fi
 
-                    echo "✅ Backup file detected:"
-                    ls -lh "$DB_BACKUP"
-                    file "$DB_BACKUP"
+                    ORIGINAL_FILE_NAME=$(basename "$DB_BACKUP")
+
+                    echo "📄 Original filename: $ORIGINAL_FILE_NAME"
+                    echo "📂 Copying file to workspace WITHOUT renaming"
+
+                    cp "$DB_BACKUP" "$ORIGINAL_FILE_NAME"
+
+                    echo "✅ File in workspace:"
+                    ls -lh "$ORIGINAL_FILE_NAME"
                 '''
             }
         }
@@ -45,7 +46,9 @@ pipeline {
                         set +e
                         export PGPASSWORD="$DB_PASS"
 
-                        echo "🔄 Restoring database '$DB_NAME'"
+                        ORIGINAL_FILE_NAME=$(basename "$DB_BACKUP")
+
+                        echo "🔄 Restoring from file: $ORIGINAL_FILE_NAME"
 
                         pg_restore \
                           -h "$DB_HOST" \
@@ -57,7 +60,7 @@ pipeline {
                           --no-owner \
                           --no-privileges \
                           --verbose \
-                          "$DB_BACKUP"
+                          "$ORIGINAL_FILE_NAME"
 
                         EXIT_CODE=$?
 
